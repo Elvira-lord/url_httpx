@@ -81,12 +81,13 @@ class request_url():
             except:
                 title='-'
             server = str(response.headers.get('Server'))
-            # print(title)
-            return [url, response.url, self.extract_host(url), response.status_code, len(response.text), title, server]
-            #['请求url', '响应url', 'host', 响应码, 响应长度, 'title', 'Server']
+            protocol = url.split('://')[0] if '://' in url else '-'
+            return [url, response.url, self.extract_host(url), response.status_code, len(response.text), title, server, protocol]
+            #['请求url', '响应url', 'host', 响应码, 响应长度, 'title', 'Server', 'protocol']
         except:
             self.content = None  # 确保content被设置为None
-            return [url, url, self.extract_host(url), 0, 0, '-', '-']
+            protocol = url.split('://')[0] if '://' in url else '-'
+            return [url, url, self.extract_host(url), 0, 0, '-', '-', protocol]
 
     def link_url(self):
         # 如果内容为空或None，直接返回空结果
@@ -138,19 +139,19 @@ class request_url():
             return 'null'
 
     def display(self,response):
-        #['请求url', '响应url', 'host', 响应码, 响应长度, 'title', 'Server']
+        #['请求url', '响应url', 'host', 响应码, 响应长度, 'title', 'Server', 'protocol']
         if str(response[3]).startswith('2'):
-            print(f'\033[32m[{response[3]}] -- [{response[4]}] {response[1]}  [title]:{response[5]}   [server]:{response[6]}\033[0m')
+            print(f'\033[32m[{response[3]}] -- [{response[4]}] {response[1]}  [title]:{response[5]}   [server]:{response[6]}   [protocol]:{response[7]}\033[0m')
         elif str(response[3]).startswith('3'):
-            print(f'\033[34m[{response[3]}] -- [{response[4]}] {response[1]}  [title]:{response[5]}   [server]:{response[6]}\033[0m')
+            print(f'\033[34m[{response[3]}] -- [{response[4]}] {response[1]}  [title]:{response[5]}   [server]:{response[6]}   [protocol]:{response[7]}\033[0m')
         elif str(response[3]).startswith('4'):
-            print(f'\033[31m[{response[3]}] -- [{response[4]}] {response[1]}  [title]:{response[5]}   [server]:{response[6]}\033[0m')
+            print(f'\033[31m[{response[3]}] -- [{response[4]}] {response[1]}  [title]:{response[5]}   [server]:{response[6]}   [protocol]:{response[7]}\033[0m')
         elif str(response[3]).startswith('5'):
-            print(f'\033[33m[{response[3]}] -- [{response[4]}] {response[1]}  [title]:{response[5]}   [server]:{response[6]}\033[0m')
+            print(f'\033[33m[{response[3]}] -- [{response[4]}] {response[1]}  [title]:{response[5]}   [server]:{response[6]}   [protocol]:{response[7]}\033[0m')
         elif str(response[3]).startswith('0'):
-            print(f'\033[35m[{response[3]}] -- [{response[4]}] {response[1]}  [title]:{response[5]}   [server]:{response[6]}\033[0m')
+            print(f'\033[35m[{response[3]}] -- [{response[4]}] {response[1]}  [title]:{response[5]}   [server]:{response[6]}   [protocol]:{response[7]}\033[0m')
         else:
-            print(f'[{response[3]}] -- [{response[4]}] {response[1]}  [title]:{response[5]}   [server]:{response[6]}')
+            print(f'[{response[3]}] -- [{response[4]}] {response[1]}  [title]:{response[5]}   [server]:{response[6]}   [protocol]:{response[7]}')
 
 
 class save():
@@ -173,6 +174,7 @@ class save():
                 ws['E1']='length'
                 ws['F1']='title'
                 ws['G1']='server'
+                ws['H1']='protocol'
                 wb.save('result/url.xlsx')
         wb = openpyxl.load_workbook('result/url.xlsx')
         ws = wb.active
@@ -193,17 +195,51 @@ url_list=[]     #用来存储原来的url的响应
 
 source_url_list={}  #源码中爬取到的链接
 
+# 用于跟踪每个域名的协议信息
+protocol_tracker = {}
+
 for u in url:
     # print(f'{u}')   #每个链接
     req=request_url()
     response1=req.req_url(u)   #获取响应啥的
     # print(response1)
-    if u[:5] == response1[0][:5] and response1[1] != 0:   #只存储响对应的协议的url
-        url_list.append(response1)
+    if u[:5] == response1[0][:5] and response1[3] != 0:   #只存储响对应的协议的url
+        host = response1[2]
+        protocol = response1[7]
+
+        # 跟踪协议信息
+        if host not in protocol_tracker:
+            protocol_tracker[host] = {'http': False, 'https': False, 'responses': []}
+
+        if protocol == 'http':
+            protocol_tracker[host]['http'] = True
+        elif protocol == 'https':
+            protocol_tracker[host]['https'] = True
+
+        protocol_tracker[host]['responses'].append(response1)
+
         req.display(response1)
         domain_url,source_url=req.link_url()
         source_url_list[domain_url]=sorted(list(set(source_url)))
 
+# 处理协议信息并生成最终结果
+final_results = []
+for host, info in protocol_tracker.items():
+    if info['http'] and info['https']:
+        protocol_str = 'http / https'
+    elif info['http']:
+        protocol_str = 'http'
+    elif info['https']:
+        protocol_str = 'https'
+    else:
+        protocol_str = '-'
+
+    # 更新所有响应的协议信息
+    for response in info['responses']:
+        response[7] = protocol_str
+        final_results.append(response)
+
+url_list = final_results
 
 # print(url_list)   #这个用来后面保存文件，探活【基本功能】
 # print(source_url_list)     #这个用来后面保存文件,字典，保存每个源代码的内提取的链接
