@@ -225,19 +225,47 @@ for u in url:
 # 处理协议信息并生成最终结果
 final_results = []
 for host, info in protocol_tracker.items():
-    if info['http'] and info['https']:
-        protocol_str = 'http / https'
-    elif info['http']:
-        protocol_str = 'http'
-    elif info['https']:
-        protocol_str = 'https'
-    else:
-        protocol_str = '-'
+    # 检查是否有协议跳转情况
+    http_to_https = False
+    https_to_http = False
 
-    # 更新所有响应的协议信息
+    # 分析跳转情况
     for response in info['responses']:
-        response[7] = protocol_str
-        final_results.append(response)
+        request_protocol = response[0].split('://')[0] if '://' in response[0] else ''
+        response_protocol = response[1].split('://')[0] if '://' in response[1] else ''
+
+        if request_protocol == 'http' and response_protocol == 'https':
+            http_to_https = True
+        elif request_protocol == 'https' and response_protocol == 'http':
+            https_to_http = True
+
+    # 根据跳转情况决定保留哪些结果
+    if http_to_https and not https_to_http:
+        # http跳转到https，只保留https结果
+        for response in info['responses']:
+            if response[1].startswith('https://'):
+                response[7] = 'https'
+                final_results.append(response)
+    elif https_to_http and not http_to_https:
+        # https跳转到http，只保留http结果
+        for response in info['responses']:
+            if response[1].startswith('http://'):
+                response[7] = 'http'
+                final_results.append(response)
+    else:
+        # 没有跳转或双向跳转，按原逻辑处理
+        if info['http'] and info['https']:
+            protocol_str = 'http / https'
+        elif info['http']:
+            protocol_str = 'http'
+        elif info['https']:
+            protocol_str = 'https'
+        else:
+            protocol_str = '-'
+
+        for response in info['responses']:
+            response[7] = protocol_str
+            final_results.append(response)
 
 url_list = final_results
 
