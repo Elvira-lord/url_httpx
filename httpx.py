@@ -77,14 +77,15 @@ class request_url():
             response.encoding = 'utf-8'
             self.content = response.text
             try:
-                title = re.findall(r'<title>(.*?)</title>', response.text)[0]
-            except:
-                title='-'
-            server = str(response.headers.get('Server'))
+                title_match = re.findall(r'<title>(.*?)</title>', response.text, re.IGNORECASE)
+                title = title_match[0] if title_match else '-'
+            except Exception:
+                title = '-'
+            server = str(response.headers.get('Server', '-'))
             protocol = url.split('://')[0] if '://' in url else '-'
             return [url, response.url, self.extract_host(url), response.status_code, len(response.text), title, server, protocol]
             #['请求url', '响应url', 'host', 响应码, 响应长度, 'title', 'Server', 'protocol']
-        except:
+        except Exception as e:
             self.content = None  # 确保content被设置为None
             protocol = url.split('://')[0] if '://' in url else '-'
             return [url, url, self.extract_host(url), 0, 0, '-', '-', protocol]
@@ -97,23 +98,26 @@ class request_url():
         re_rule1=r'href=([\'"])(.*?)\1'
         re_rule2=r'src=([\'"])(.*?)\1'
         #这里可以继续加正则，然后继续拼接
-        url=re.findall(re_rule1,self.content)
-        url+=re.findall(re_rule2,self.content)
+        url=re.findall(re_rule1,self.content, re.IGNORECASE)
+        url+=re.findall(re_rule2,self.content, re.IGNORECASE)
         url_list=[]
         for i in range(len(url)):
+            link = url[i][1]
+            if not link or link.startswith('#') or link.startswith('javascript:'):
+                continue
+
             #过滤
-            if url[i][1].startswith('http://'):
-                houzui=url[i][1][7:].replace('///','/').replace('//','/')
+            if link.startswith('http://'):
+                houzui=link[7:].replace('///','/').replace('//','/')
                 url_list.append('http://'+houzui)
-            elif url[i][1].startswith('https://'):
-                houzui=url[i][1][8:].replace('///','/').replace('//','/')
+            elif link.startswith('https://'):
+                houzui=link[8:].replace('///','/').replace('//','/')
                 url_list.append('https://'+houzui)
-            elif url[i][1].startswith('/'):
-                houzui=url[i][1].replace('///','/').replace('//','/')
+            elif link.startswith('/'):
+                houzui=link.replace('///','/').replace('//','/')
                 url_list.append(self.domain_url()+houzui)
 
-
-        return self.domain_url(),sorted(list(url_list))
+        return self.domain_url(),sorted(list(set(url_list)))
 
         # 返回域名
     def domain_url(self):
@@ -197,30 +201,42 @@ source_url_list={}  #源码中爬取到的链接
 
 # 用于跟踪每个域名的协议信息
 protocol_tracker = {}
+processed_hosts = {}  # 避免重复处理同一域名
 
 for u in url:
     # print(f'{u}')   #每个链接
     req=request_url()
     response1=req.req_url(u)   #获取响应啥的
     # print(response1)
-    if u[:5] == response1[0][:5] and response1[3] != 0:   #只存储响对应的协议的url
-        host = response1[2]
-        protocol = response1[7]
 
-        # 跟踪协议信息
-        if host not in protocol_tracker:
-            protocol_tracker[host] = {'http': False, 'https': False, 'responses': []}
+    # 检查响应是否有效
+    if response1[3] == 0:  # 状态码为0表示请求失败
+        continue
 
-        if protocol == 'http':
-            protocol_tracker[host]['http'] = True
-        elif protocol == 'https':
-            protocol_tracker[host]['https'] = True
+    # 检查协议一致性（避免http/https混用）
+    if u[:5] != response1[0][:5]:
+        continue
 
-        protocol_tracker[host]['responses'].append(response1)
+    host = response1[2]
+    protocol = response1[7]
 
+    # 跟踪协议信息
+    if host not in protocol_tracker:
+        protocol_tracker[host] = {'http': False, 'https': False, 'responses': []}
+
+    if protocol == 'http':
+        protocol_tracker[host]['http'] = True
+    elif protocol == 'https':
+        protocol_tracker[host]['https'] = True
+
+    protocol_tracker[host]['responses'].append(response1)
+
+    # 只在首次处理该域名时提取链接，避免重复
+    if host not in processed_hosts:
         req.display(response1)
-        domain_url,source_url=req.link_url()
-        source_url_list[domain_url]=sorted(list(set(source_url)))
+        domain_url, source_url = req.link_url()
+        source_url_list[domain_url] = sorted(list(set(source_url)))
+        processed_hosts[host] = True
 
 # 处理协议信息并生成最终结果
 final_results = []
