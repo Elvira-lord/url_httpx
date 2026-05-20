@@ -11,7 +11,7 @@ import openpyxl
 |___|  / |__|   |__|  |   __/ /__/\_ \ /\ \_______ \
      \/               |__|          \/ \/         \/
 """+ "\033[0m"+"\033[31m"+r"""
-[*]version:2.0.0
+[*]version:3.0.0
 """
 
 print(标题)
@@ -19,6 +19,8 @@ print(标题)
 import requests
 import random
 import re
+from concurrent.futures import ThreadPoolExecutor, as_completed
+import threading
 
 ua=[
     'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36 Edg/146.0.0.0',
@@ -70,49 +72,78 @@ class request_url():
         self.url = None
         self.content = None
 
-    def req_url(self,url):
-        try:
-            self.url = url
-            response = requests.get(url, headers={'User-Agent': random.choice(ua)}, timeout=2.5)
-            response.encoding = 'utf-8'
-            self.content = response.text
+    def req_url(self, url, retries=2):
+        self.url = url
+        protocol = url.split('://')[0] if '://' in url else '-'
+        for attempt in range(retries + 1):
             try:
-                title_match = re.findall(r'<title>(.*?)</title>', response.text, re.IGNORECASE)
-                title = title_match[0] if title_match else '-'
+                response = requests.get(url, headers={'User-Agent': random.choice(ua)}, timeout=5)
+                response.encoding = 'utf-8'
+                self.content = response.text
+                try:
+                    title_match = re.findall(r'<title>(.*?)</title>', response.text, re.IGNORECASE)
+                    title = title_match[0] if title_match else '-'
+                except Exception:
+                    title = '-'
+                server = str(response.headers.get('Server', '-'))
+                return [url, response.url, self.extract_host(url), response.status_code, len(response.text), title, server, protocol]
             except Exception:
-                title = '-'
-            server = str(response.headers.get('Server', '-'))
-            protocol = url.split('://')[0] if '://' in url else '-'
-            return [url, response.url, self.extract_host(url), response.status_code, len(response.text), title, server, protocol]
-            #['请求url', '响应url', 'host', 响应码, 响应长度, 'title', 'Server', 'protocol']
-        except Exception as e:
-            self.content = None  # 确保content被设置为None
-            protocol = url.split('://')[0] if '://' in url else '-'
-            return [url, url, self.extract_host(url), 0, 0, '-', '-', protocol]
+                if attempt < retries:
+                    continue
+                self.content = None
+                return [url, url, self.extract_host(url), 0, 0, '-', '-', protocol]
 
     def link_url(self):
         # 如果内容为空或None，直接返回空结果
         if not self.content:
             return self.domain_url(), []
 
-        re_rule1=r'href=([\'"])(.*?)\1'
-        re_rule2=r'src=([\'"])(.*?)\1'
-        #这里可以继续加正则，然后继续拼接
-        url=re.findall(re_rule1,self.content, re.IGNORECASE)
-        url+=re.findall(re_rule2,self.content, re.IGNORECASE)
+        # HTML属性中的链接
+        re_rules=[
+            r'href=([\'"])(.*?)\1',           # href链接
+            r'src=([\'"])(.*?)\1',            # src资源
+            r'action=([\'"])(.*?)\1',         # 表单提交地址
+            r'data-src=([\'"])(.*?)\1',       # 懒加载图片
+            r'data-href=([\'"])(.*?)\1',      # 自定义跳转
+            r'data-url=([\'"])(.*?)\1',       # 自定义URL
+            r'srcset=([\'"])(.*?)\1',         # 响应式图片
+            r'background=([\'"])(.*?)\1',     # 背景图
+            r'poster=([\'"])(.*?)\1',         # 视频封面
+            r'content=([\'"])\d+;url=(.*?)\1', # meta跳转
+        ]
+        url=[]
+        for rule in re_rules:
+            url+=re.findall(rule, self.content, re.IGNORECASE)
+
+        # CSS中的url()
+        css_urls=re.findall(r'url\(([\'"]?)(.*?)\1\)', self.content, re.IGNORECASE)
+        url+=[u for u in css_urls if u[1]]
+
+        # JavaScript中的链接
+        js_rules=[
+            r'(?:window\.open|location\.href|location\.assign)\s*\(\s*([\'"])(.*?)\1',
+            r'(?:src|href)\s*[:=]\s*([\'"])(.*?)\1',
+        ]
+        for rule in js_rules:
+            url+=re.findall(rule, self.content, re.IGNORECASE)
         url_list=[]
-        for i in range(len(url)):
-            link = url[i][1]
+        for item in url:
+            link = item[1].strip()
             if not link or link.startswith('#') or link.startswith('javascript:'):
                 continue
 
-            #过滤
+            # 过滤和规范化
+            link = link.split('#')[0].split('?')[0] if '#' in link or '?' in link else link
+            link = re.sub(r'[\'">\s]+$', '', link)  # 清理尾部杂质
+
             if link.startswith('http://'):
                 houzui=link[7:].replace('///','/').replace('//','/')
                 url_list.append('http://'+houzui)
             elif link.startswith('https://'):
                 houzui=link[8:].replace('///','/').replace('//','/')
                 url_list.append('https://'+houzui)
+            elif link.startswith('//'):
+                url_list.append('https://'+link[2:])
             elif link.startswith('/'):
                 houzui=link.replace('///','/').replace('//','/')
                 url_list.append(self.domain_url()+houzui)
@@ -203,40 +234,79 @@ source_url_list={}  #源码中爬取到的链接
 protocol_tracker = {}
 processed_hosts = {}  # 避免重复处理同一域名
 
-for u in url:
-    # print(f'{u}')   #每个链接
-    req=request_url()
-    response1=req.req_url(u)   #获取响应啥的
-    # print(response1)
+# 线程锁，保护共享数据和print输出
+lock = threading.Lock()
 
-    # 检查响应是否有效
-    if response1[3] == 0:  # 状态码为0表示请求失败
-        continue
+# 线程数，默认10，可通过环境变量 THREADS 调整
+THREADS = int(os.environ.get('THREADS', 10))
 
-    # 检查协议一致性（避免http/https混用）
-    if u[:5] != response1[0][:5]:
-        continue
+# 统计计数器
+stats = {'total': len(url), 'done': 0, 'success': 0, 'timeout': 0, 'filtered': 0}
 
-    host = response1[2]
-    protocol = response1[7]
+def process_url(u):
+    """处理单个url：请求 + 链接提取"""
+    req = request_url()
+    response1 = req.req_url(u)
 
-    # 跟踪协议信息
-    if host not in protocol_tracker:
-        protocol_tracker[host] = {'http': False, 'https': False, 'responses': []}
+    # 统计请求失败（状态码0=超时/连接失败）
+    if response1[3] == 0:
+        return {'status': 'timeout', 'url': u, 'host': req.extract_host(u)}
 
-    if protocol == 'http':
-        protocol_tracker[host]['http'] = True
-    elif protocol == 'https':
-        protocol_tracker[host]['https'] = True
+    # 提取链接（每个req实例独立，线程安全）
+    domain_url, source_url = req.link_url()
 
-    protocol_tracker[host]['responses'].append(response1)
+    return {
+        'status': 'ok',
+        'response': response1,
+        'host': response1[2],
+        'protocol': response1[7],
+        'domain_url': domain_url,
+        'source_url': source_url,
+    }
 
-    # 只在首次处理该域名时提取链接，避免重复
-    if host not in processed_hosts:
-        req.display(response1)
-        domain_url, source_url = req.link_url()
-        source_url_list[domain_url] = sorted(list(set(source_url)))
-        processed_hosts[host] = True
+print(f'\033[36m[*] 线程数: {THREADS}, 总URL数: {stats["total"]}\033[0m')
+
+with ThreadPoolExecutor(max_workers=THREADS) as executor:
+    futures = {executor.submit(process_url, u): u for u in url}
+    for future in as_completed(futures):
+        result = future.result()
+        with lock:
+            stats['done'] += 1
+            # 每处理20个URL打印一次进度
+            if stats['done'] % 20 == 0 or stats['done'] == stats['total']:
+                print(f'\033[36m[*] 进度: {stats["done"]}/{stats["total"]}'
+                      f'  成功: {stats["success"]}  超时: {stats["timeout"]}'
+                      f'  唯一host: {len(protocol_tracker)}\033[0m')
+
+        if result['status'] == 'timeout':
+            with lock:
+                stats['timeout'] += 1
+            continue
+
+        with lock:
+            stats['success'] += 1
+        host = result['host']
+        protocol = result['protocol']
+        response1 = result['response']
+
+        with lock:
+            # 跟踪协议信息
+            if host not in protocol_tracker:
+                protocol_tracker[host] = {'http': False, 'https': False, 'responses': []}
+
+            if protocol == 'http':
+                protocol_tracker[host]['http'] = True
+            elif protocol == 'https':
+                protocol_tracker[host]['https'] = True
+
+            protocol_tracker[host]['responses'].append(response1)
+
+            # 只在首次处理该域名时提取链接，避免重复
+            if host not in processed_hosts:
+                req = request_url()
+                req.display(response1)
+                source_url_list[result['domain_url']] = sorted(list(set(result['source_url'])))
+                processed_hosts[host] = True
 
 # 处理协议信息并生成最终结果
 final_results = []
@@ -285,8 +355,16 @@ for host, info in protocol_tracker.items():
 
 url_list = final_results
 
-# print(url_list)   #这个用来后面保存文件，探活【基本功能】
-# print(source_url_list)     #这个用来后面保存文件,字典，保存每个源代码的内提取的链接
+# 最终统计
+print(f'\n\033[36m{"="*50}')
+print(f'[*] 统计结果:')
+print(f'    输入URL数: {stats["total"]}')
+print(f'    请求成功: {stats["success"]}')
+print(f'    请求超时/失败: {stats["timeout"]}')
+print(f'    唯一host数: {len(protocol_tracker)}')
+print(f'    最终输出行数: {len(url_list)}')
+print(f'    提取链接域名数: {len(source_url_list)}')
+print(f'{"="*50}\033[0m\n')
 
 #保存基本的探活文件
 save_file=save()
